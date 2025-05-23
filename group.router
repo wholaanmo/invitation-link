@@ -1,0 +1,89 @@
+const express = require('express');
+const router = express.Router();
+const groupController = require('./group.controller');
+const { checkToken } = require('../../auth/token_validation');
+const groupAuth = require('../../auth/groupAuth');
+const pool = require('../../config/database');
+
+router.use((req, res, next) => {
+    console.log(`Incoming ${req.method} request to: ${req.originalUrl}`);
+    next();
+  });
+
+  router.post('/test-invite', (req, res) => {
+    console.log('Test invite route hit');
+    res.json({ success: true });
+  });
+
+router.post('/create', checkToken, groupController.createGroup);
+router.post('/join', checkToken, groupController.joinGroup);
+router.get('/my-groups', checkToken, groupController.getUserGroups);
+
+// Group-specific routes (require membership)
+router.get('/:groupId', checkToken, groupAuth('member'), groupController.getGroupInfo);
+router.get('/:groupId/members', checkToken, groupAuth('member'), groupController.getMembers);
+
+// Admin-only routes
+router.delete('/:groupId', checkToken, groupAuth('admin'), groupController.deleteGroup);
+//router.post('/:groupId/members/invite', checkToken, groupAuth('admin'), groupController.inviteMember);
+
+router.post('/:groupId/members/invite', checkToken, groupAuth('admin'), (req, res, next) => {
+    console.log('Invite route hit - params:', req.params);
+    console.log('Invite route hit - body:', req.body);
+    next();
+  }, groupController.inviteMember);
+
+router.get('/invite/accept', groupController.acceptInvite);
+router.get('/pending-invites', checkToken, groupController.getPendingInvites);
+
+// group.router.js
+router.get('/:groupId/verify-membership', checkToken, async (req, res) => {
+  try {
+    const { groupId } = req.params;
+    const userId = req.user.userId;
+
+    if (!groupId || !userId) {
+      return res.status(400).json({
+        success: 0,
+        message: 'Missing groupId or userId'
+      });
+    }
+
+    // Check direct membership
+    const [membership] = await pool.query(
+      'SELECT id FROM group_members WHERE group_id = ? AND user_id = ?',
+      [groupId, userId]
+    );
+
+    // Check pending invites only if not already a member
+    if (membership.length === 0) {
+      const [user] = await pool.query('SELECT email FROM users WHERE id = ?', [userId]);
+      const userEmail = user[0]?.email;
+      
+      if (userEmail) {
+        const [invites] = await pool.query(
+          'SELECT id FROM pending_invites WHERE group_id = ? AND email = ? AND expires_at > NOW()',
+          [groupId, userEmail]
+        );
+        
+        return res.json({
+          success: 1,
+          isMember: invites.length > 0
+        });
+      }
+    }
+
+    return res.json({
+      success: 1,
+      isMember: membership.length > 0
+    });
+  } catch (err) {
+    console.error('Verify membership error:', err);
+    return res.status(500).json({
+      success: 0,
+      message: 'Failed to verify membership',
+      error: err.message
+    });
+  }
+});
+module.exports = router;
